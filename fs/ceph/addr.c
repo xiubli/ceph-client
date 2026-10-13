@@ -807,6 +807,7 @@ static int write_folio_nounlock(struct folio *folio,
 	loff_t page_off = folio_pos(folio);
 	int err;
 	loff_t len = folio_size(folio);
+	long nr_pages = folio_nr_pages(folio);
 	loff_t wlen;
 	struct ceph_writeback_ctl ceph_wbc;
 	struct ceph_osd_client *osdc = &fsc->client->osdc;
@@ -858,7 +859,7 @@ static int write_folio_nounlock(struct folio *folio,
 	/* wait for a cache write left pending by a previously failed attempt */
 	ceph_folio_wait_fscache(folio);
 
-	if (atomic_long_inc_return(&fsc->writeback_count) >
+	if (atomic_long_add_return(nr_pages, &fsc->writeback_count) >
 	    CONGESTION_ON_THRESH(fsc->mount_options->congestion_kb))
 		fsc->write_congested = true;
 
@@ -869,7 +870,7 @@ static int write_folio_nounlock(struct folio *folio,
 				    ceph_wbc.truncate_size, true);
 	if (IS_ERR(req)) {
 		folio_redirty_for_writepage(wbc, folio);
-		if (atomic_long_dec_return(&fsc->writeback_count) <
+		if (atomic_long_sub_return(nr_pages, &fsc->writeback_count) <
 				CONGESTION_OFF_THRESH(fsc->mount_options->congestion_kb))
 			fsc->write_congested = false;
 		return PTR_ERR(req);
@@ -891,7 +892,7 @@ static int write_folio_nounlock(struct folio *folio,
 			folio_redirty_for_writepage(wbc, folio);
 			folio_end_writeback(folio);
 			ceph_osdc_put_request(req);
-			if (atomic_long_dec_return(&fsc->writeback_count) <
+			if (atomic_long_sub_return(nr_pages, &fsc->writeback_count) <
 					CONGESTION_OFF_THRESH(fsc->mount_options->congestion_kb))
 				fsc->write_congested = false;
 			return PTR_ERR(bounce_page);
@@ -931,7 +932,7 @@ static int write_folio_nounlock(struct folio *folio,
 			      ceph_vinop(inode), folio);
 			folio_redirty_for_writepage(wbc, folio);
 			folio_end_writeback(folio);
-			if (atomic_long_dec_return(&fsc->writeback_count) <
+			if (atomic_long_sub_return(nr_pages, &fsc->writeback_count) <
 					CONGESTION_OFF_THRESH(fsc->mount_options->congestion_kb))
 				fsc->write_congested = false;
 			return err;
@@ -953,7 +954,7 @@ static int write_folio_nounlock(struct folio *folio,
 	ceph_put_wrbuffer_cap_refs(ci, 1, snapc);
 	ceph_put_snap_context(snapc);  /* page's reference */
 
-	if (atomic_long_dec_return(&fsc->writeback_count) <
+	if (atomic_long_sub_return(nr_pages, &fsc->writeback_count) <
 	    CONGESTION_OFF_THRESH(fsc->mount_options->congestion_kb))
 		fsc->write_congested = false;
 
@@ -1341,9 +1342,11 @@ bool is_num_ops_too_big(struct ceph_writeback_ctl *ceph_wbc)
 }
 
 static inline
-bool is_write_congestion_happened(struct ceph_fs_client *fsc)
+bool is_write_congestion_happened(struct ceph_fs_client *fsc,
+				  struct folio *folio)
 {
-	return atomic_long_inc_return(&fsc->writeback_count) >
+	return atomic_long_add_return(folio_nr_pages(folio),
+				      &fsc->writeback_count) >
 		CONGESTION_ON_THRESH(fsc->mount_options->congestion_kb);
 }
 
@@ -1479,7 +1482,7 @@ void ceph_process_folio_batch(struct address_space *mapping,
 			break;
 		}
 
-		if (is_write_congestion_happened(fsc))
+		if (is_write_congestion_happened(fsc, folio))
 			fsc->write_congested = true;
 
 		ceph_wbc->fbatch.folios[i] = NULL;
