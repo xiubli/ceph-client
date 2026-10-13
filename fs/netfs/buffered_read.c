@@ -635,10 +635,18 @@ int netfs_write_begin(struct netfs_inode *ctx,
 	struct netfs_io_request *rreq;
 	struct folio *folio;
 	pgoff_t index = pos >> PAGE_SHIFT;
+	fgf_t fgp_flags = FGP_WRITEBEGIN;
 	int ret;
 
+	/*
+	 * Size a new folio by the write, but only from a page boundary: a
+	 * large folio that the write starts inside of would have to be
+	 * read in whole first.  The folio then ends inside the write too.
+	 */
+	if (!offset_in_page(pos))
+		fgp_flags |= fgf_set_order(len);
 retry:
-	folio = __filemap_get_folio(mapping, index, FGP_WRITEBEGIN,
+	folio = __filemap_get_folio(mapping, index, fgp_flags,
 				    mapping_gfp_mask(mapping));
 	if (IS_ERR(folio))
 		return PTR_ERR(folio);
