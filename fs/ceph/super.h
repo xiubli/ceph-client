@@ -1450,6 +1450,7 @@ extern void __ceph_touch_fmode(struct ceph_inode_info *ci,
 
 /* addr.c */
 extern const struct address_space_operations ceph_aops;
+extern void ceph_set_folio_order(struct inode *inode);
 extern const struct netfs_request_ops ceph_netfs_ops;
 int ceph_mmap_prepare(struct vm_area_desc *desc);
 extern int ceph_pool_perm_check(struct inode *inode, int need);

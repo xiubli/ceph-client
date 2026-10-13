@@ -2049,6 +2049,16 @@ static int ceph_write_begin(const struct kiocb *iocb,
 
 	ceph_blog_enter(fsc, &__ji);
 
+	/*
+	 * Lazy I/O writers of a file don't exclude each other, and
+	 * writeback sends whole folios: keep a folio this creates to one
+	 * page, so that a write carries no more stale data of its
+	 * neighbours back to the OSDs than it would without large folios.
+	 */
+	if (((struct ceph_file_info *)file->private_data)->fmode &
+	    CEPH_FILE_MODE_LAZY)
+		len = min_t(unsigned int, len, PAGE_SIZE - offset_in_page(pos));
+
 	r = netfs_write_begin(&ci->netfs, file, inode->i_mapping, pos, len, foliop, NULL);
 	if (r < 0) {
 		ceph_blog_exit(&__ji);
@@ -2106,6 +2116,38 @@ out:
 
 	ceph_blog_exit(&__ji);
 	return copied;
+}
+
+/*
+ * Let the page cache of a new regular file use folios of up to the
+ * largest size that is no larger than wsize, divides every stripe unit
+ * (a multiple of CEPH_MIN_STRIPE_UNIT) and is at most
+ * PAGE_ALLOC_COSTLY_ORDER: a folio then never spans two objects and
+ * always fits in one writeback request, whatever layout the file gets
+ * later.  Larger orders measured slower: zeroing (init_on_alloc) and
+ * allocating them cost more client CPU than the per-page work they save.
+ *
+ * fscrypt bounces folios a page at a time and the inline data code
+ * fills page 0 only, so those keep order-0 folios.
+ *
+ * Called once, while the inode is I_NEW.
+ */
+void ceph_set_folio_order(struct inode *inode)
+{
+	struct ceph_fs_client *fsc = ceph_inode_to_fs_client(inode);
+	unsigned long bytes;
+	unsigned int max_order;
+
+	if (IS_ENABLED(CONFIG_CEPH_FS_INLINE_DATA) || IS_ENCRYPTED(inode))
+		return;
+
+	bytes = min_t(unsigned long, CEPH_MIN_STRIPE_UNIT,
+		      rounddown_pow_of_two(fsc->mount_options->wsize));
+	if (bytes <= PAGE_SIZE)
+		return;
+	max_order = min3(ilog2(bytes) - PAGE_SHIFT, PAGE_ALLOC_COSTLY_ORDER,
+			 MAX_PAGECACHE_ORDER);
+	mapping_set_folio_order_range(inode->i_mapping, 0, max_order);
 }
 
 const struct address_space_operations ceph_aops = {

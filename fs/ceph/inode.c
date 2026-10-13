@@ -1335,6 +1335,8 @@ int ceph_fill_inode(struct inode *inode, struct folio *locked_folio,
 	case S_IFREG:
 		inode->i_op = &ceph_file_iops;
 		inode->i_fop = &ceph_file_fops;
+		if (inode_state_read_once(inode) & I_NEW)
+			ceph_set_folio_order(inode);
 		break;
 	case S_IFLNK:
 		if (!ci->i_symlink) {
