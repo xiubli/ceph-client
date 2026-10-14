@@ -44,7 +44,8 @@ static int ceph_tcp_recvpage(struct socket *sock, struct page *page,
 	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
 	int r;
 
-	BUG_ON(page_offset + length > PAGE_SIZE);
+	/* the piece may span the pages of a large folio */
+	BUG_ON(page_offset >= PAGE_SIZE);
 	bvec_set_page(&bvec, page, length, page_offset);
 	iov_iter_bvec(&msg.msg_iter, ITER_DEST, &bvec, 1, length);
 	r = sock_recvmsg(sock, &msg, msg.msg_flags);
@@ -1146,7 +1147,7 @@ static int read_partial_msg_data(struct ceph_connection *con)
 			continue;
 		}
 
-		page = ceph_msg_data_next(cursor, &page_offset, &length);
+		page = ceph_msg_data_next_run(cursor, &page_offset, &length);
 		ret = ceph_tcp_recvpage(con->sock, page, page_offset, length);
 		if (ret <= 0) {
 			if (do_datacrc)
@@ -1156,8 +1157,8 @@ static int read_partial_msg_data(struct ceph_connection *con)
 		}
 
 		if (do_datacrc)
-			crc = ceph_crc32c_page(crc, page, page_offset, ret);
-		ceph_msg_data_advance(cursor, (size_t)ret);
+			crc = ceph_crc32c_run(crc, page, page_offset, ret);
+		ceph_msg_data_advance_run(cursor, (size_t)ret);
 	}
 	if (do_datacrc)
 		con->in_data_crc = crc;
