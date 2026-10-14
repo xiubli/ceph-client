@@ -1008,10 +1008,19 @@ static int calc_sg_cnt_cursor(struct ceph_msg_data_cursor *cursor)
 	/*
 	 * A page at a time: an upper bound for init_sgs_cursor(), which
 	 * takes the runs of a large folio, even if the runs were to come
-	 * out different the second time.
+	 * out different the second time.  For an iterator that is the
+	 * number of pages it spans.
 	 */
 	sg_cnt = need_padding(data_len) ? 1 : 0;
 	do {
+		while (!cursor->resid)
+			ceph_msg_data_advance(cursor, 0);
+		if (cursor->data->type == CEPH_MSG_DATA_ITER) {
+			sg_cnt += iov_iter_npages(&cursor->iov_iter, INT_MAX);
+			ceph_msg_data_advance(cursor, cursor->resid);
+			continue;
+		}
+
 		get_bvec_at(cursor, &bv);
 		sg_cnt++;
 

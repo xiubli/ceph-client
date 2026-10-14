@@ -1208,21 +1208,83 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 	cursor->need_crc = new_piece;
 }
 
+#define CEPH_MSG_DATA_RUN_PAGES	16
+
 /*
- * Like ceph_msg_data_next(), but for a page array extend the piece over
- * the following pages as long as they are the next pages of the same
- * folio, so that a large page cache folio can be sent in one go instead
- * of a page at a time.  The piece may then be longer than a page; it
- * never leaves the folio, so its pages are consecutive.  The cursor
- * isn't advanced; use ceph_msg_data_advance_run() for that.
+ * ceph_msg_data_next_run() for an iterator: take the first page as
+ * ceph_msg_data_iter_next() does and, if the iterator goes on into the
+ * next pages of its folio, take those too in one more call.
+ */
+static struct page *
+ceph_msg_data_iter_next_run(struct ceph_msg_data_cursor *cursor,
+			    size_t *page_offset, size_t *length)
+{
+	struct page *pages[CEPH_MSG_DATA_RUN_PAGES];
+	struct page *page;
+	struct folio *folio;
+	size_t off, got = 0;
+	ssize_t len;
+	int i, n;
+
+	page = ceph_msg_data_iter_next(cursor, page_offset, length);
+	if (*page_offset + cursor->lastlen != PAGE_SIZE ||
+	    cursor->lastlen >= cursor->resid)
+		return page;
+
+	folio = page_folio(page);
+	n = min_t(long, folio_nr_pages(folio) - folio_page_idx(folio, page) - 1,
+		  ARRAY_SIZE(pages));
+	if (n <= 0)
+		return page;
+
+	/* the iterator is just past the first page (lastlen) */
+	len = iov_iter_get_pages2(&cursor->iov_iter, pages,
+				  min_t(size_t, n * PAGE_SIZE,
+					cursor->resid - cursor->lastlen),
+				  n, &off);
+	if (len <= 0)
+		return page;
+	n = DIV_ROUND_UP(off + len, PAGE_SIZE);
+	for (i = 0; !off && i < n && pages[i] == page + 1 + i; i++)
+		got += min_t(size_t, len - got, PAGE_SIZE);
+	if (got < len)
+		iov_iter_revert(&cursor->iov_iter, len - got);
+
+	/* see the FIXME in ceph_msg_data_iter_next() */
+	for (i = 0; i < n; i++)
+		put_page(pages[i]);
+
+	cursor->lastlen += got;
+	*length = min_t(size_t, cursor->lastlen, cursor->resid);
+	return page;
+}
+
+/*
+ * Like ceph_msg_data_next(), but for a page array or an iterator extend
+ * the piece over the following pages as long as they are the next pages
+ * of the same folio, so that a large page cache folio can be sent or
+ * received in one go instead of a page at a time.  The piece may then
+ * be longer than a page; it never leaves the folio, so its pages are
+ * consecutive.  The cursor isn't advanced; use
+ * ceph_msg_data_advance_run() for that.
  */
 struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
 				    size_t *page_offset, size_t *length)
 {
-	struct page *page = ceph_msg_data_next(cursor, page_offset, length);
+	struct page *page;
 	struct page **pages;
 	unsigned int i;
 
+	/*
+	 * A user-backed iterator would pin its pages again for every
+	 * page left out of a run; leave it a page at a time.
+	 */
+	if (cursor->data->type == CEPH_MSG_DATA_ITER &&
+	    !user_backed_iter(&cursor->iov_iter))
+		return ceph_msg_data_iter_next_run(cursor, page_offset,
+						   length);
+
+	page = ceph_msg_data_next(cursor, page_offset, length);
 	if (cursor->data->type != CEPH_MSG_DATA_PAGES)
 		return page;
 
@@ -1246,6 +1308,16 @@ struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
 void ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
 			       size_t bytes)
 {
+	while (!cursor->resid && bytes)
+		ceph_msg_data_advance(cursor, 0);
+
+	/* an iterator advances by any number of bytes */
+	if (cursor->data->type == CEPH_MSG_DATA_ITER &&
+	    bytes <= cursor->resid) {
+		ceph_msg_data_advance(cursor, bytes);
+		return;
+	}
+
 	while (bytes) {
 		size_t off, len;
 
