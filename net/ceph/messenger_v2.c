@@ -906,6 +906,78 @@ static void get_bvec_run(struct ceph_msg_data_cursor *cursor,
 	bvec_set_page(bv, page, len, off);
 }
 
+static void free_enc_pages(struct page **pages, int page_cnt)
+{
+	int i = 0;
+
+	while (i < page_cnt) {
+		struct folio *folio = page_folio(pages[i]);
+
+		i += folio_nr_pages(folio);
+		folio_put(folio);
+	}
+	kfree(pages);
+}
+
+/*
+ * Allocate the pages for the ciphertext of a message tail: folios of up
+ * to PAGE_ALLOC_COSTLY_ORDER, so that they mostly come in runs of
+ * consecutive pages that are sent and received a run at a time.  The
+ * array holds every page; free it with free_enc_pages().  A folio larger
+ * than a page is only taken if it is there without reclaim or compaction
+ * (as skb_page_frag_refill() does); otherwise fall back to smaller ones.
+ */
+static struct page **alloc_enc_pages(int page_cnt)
+{
+	struct page **pages;
+	int i = 0;
+
+	pages = kmalloc_array(page_cnt, sizeof(*pages), GFP_NOIO);
+	if (!pages)
+		return ERR_PTR(-ENOMEM);
+
+	while (i < page_cnt) {
+		unsigned int order = min_t(unsigned int, ilog2(page_cnt - i),
+					   PAGE_ALLOC_COSTLY_ORDER);
+		struct folio *folio;
+		long j;
+
+		for (;;) {
+			gfp_t gfp = GFP_NOIO;
+
+			if (order)
+				gfp = (gfp & ~__GFP_DIRECT_RECLAIM) |
+				      __GFP_NORETRY | __GFP_NOWARN;
+			folio = folio_alloc(gfp, order);
+			if (folio || !order)
+				break;
+			order--;
+		}
+		if (!folio) {
+			free_enc_pages(pages, i);
+			return ERR_PTR(-ENOMEM);
+		}
+		for (j = 0; j < folio_nr_pages(folio); j++)
+			pages[i++] = folio_page(folio, j);
+	}
+	return pages;
+}
+
+/*
+ * A bvec for the ciphertext pages from @i on, @resid bytes left: the
+ * rest of the folio that page @i is in.
+ */
+static int enc_pages_bvec(struct page **pages, int page_cnt, int i,
+			  int resid, struct bio_vec *bv)
+{
+	struct folio *folio = page_folio(pages[i]);
+	int n = folio_nr_pages(folio) - folio_page_idx(folio, pages[i]);
+
+	n = min3(n, page_cnt - i, (int)DIV_ROUND_UP(resid, PAGE_SIZE));
+	bvec_set_page(bv, pages[i], min_t(int, resid, n * PAGE_SIZE), 0);
+	return n;
+}
+
 static int calc_sg_cnt(void *buf, int buf_len)
 {
 	int sg_cnt;
@@ -933,6 +1005,11 @@ static int calc_sg_cnt_cursor(struct ceph_msg_data_cursor *cursor)
 	if (!data_len)
 		return 0;
 
+	/*
+	 * A page at a time: an upper bound for init_sgs_cursor(), which
+	 * takes the runs of a large folio, even if the runs were to come
+	 * out different the second time.
+	 */
 	sg_cnt = need_padding(data_len) ? 1 : 0;
 	do {
 		get_bvec_at(cursor, &bv);
@@ -985,11 +1062,11 @@ static void init_sgs_cursor(struct scatterlist **sg,
 		return;
 
 	do {
-		get_bvec_at(cursor, &bv);
+		get_bvec_run(cursor, &bv);
 		sg_set_page(*sg, bv.bv_page, bv.bv_len, bv.bv_offset);
 		*sg = sg_next(*sg);
 
-		ceph_msg_data_advance(cursor, bv.bv_len);
+		ceph_msg_data_advance_run(cursor, bv.bv_len);
 	} while (cursor->total_resid);
 
 	if (need_padding(data_len)) {
@@ -1084,9 +1161,11 @@ static int setup_message_sgs(struct sg_table *sgt, struct ceph_msg *msg,
 		}
 	}
 
-	WARN_ON(!sg_is_last(cur_sg));
+	/* the data may have taken fewer entries than counted */
+	WARN_ON(!cur_sg);
 	sg_set_buf(cur_sg, epilogue,
 		   CEPH_GCM_BLOCK_LEN + (add_tag ? CEPH_GCM_TAG_LEN : 0));
+	sg_mark_end(cur_sg);
 	return 0;
 }
 
@@ -1213,8 +1292,7 @@ static int decrypt_tail(struct ceph_connection *con)
 	}
 
 	WARN_ON(!con->v2.in_enc_page_cnt);
-	ceph_release_page_vector(con->v2.in_enc_pages,
-				 con->v2.in_enc_page_cnt);
+	free_enc_pages(con->v2.in_enc_pages, con->v2.in_enc_page_cnt);
 	con->v2.in_enc_pages = NULL;
 	con->v2.in_enc_page_cnt = 0;
 
@@ -1764,7 +1842,7 @@ static int prepare_message_secure(struct ceph_connection *con,
 		goto out;
 
 	enc_page_cnt = calc_pages_for(0, tail_len);
-	enc_pages = ceph_alloc_page_vector(enc_page_cnt, GFP_NOIO);
+	enc_pages = alloc_enc_pages(enc_page_cnt);
 	if (IS_ERR(enc_pages)) {
 		ret = PTR_ERR(enc_pages);
 		goto out;
@@ -2179,11 +2257,11 @@ static void prepare_read_enc_page(struct ceph_connection *con)
 	lockdep_assert_held(&con->mutex);
 	WARN_ON(!con->v2.in_enc_resid);
 
-	bvec_set_page(&bv, con->v2.in_enc_pages[con->v2.in_enc_i],
-		      min(con->v2.in_enc_resid, (int)PAGE_SIZE), 0);
-
+	con->v2.in_enc_i += enc_pages_bvec(con->v2.in_enc_pages,
+					   con->v2.in_enc_page_cnt,
+					   con->v2.in_enc_i,
+					   con->v2.in_enc_resid, &bv);
 	set_in_bvec(con, &bv);
-	con->v2.in_enc_i++;
 	con->v2.in_enc_resid -= bv.bv_len;
 
 	if (con->v2.in_enc_resid) {
@@ -2211,7 +2289,7 @@ static int prepare_read_tail_secure(struct ceph_connection *con)
 	WARN_ON(!tail_len);
 
 	enc_page_cnt = calc_pages_for(0, tail_len);
-	enc_pages = ceph_alloc_page_vector(enc_page_cnt, GFP_NOIO);
+	enc_pages = alloc_enc_pages(enc_page_cnt);
 	if (IS_ERR(enc_pages))
 		return PTR_ERR(enc_pages);
 
@@ -3414,11 +3492,11 @@ static void queue_enc_page(struct ceph_connection *con)
 	lockdep_assert_held(&con->mutex);
 	WARN_ON(!con->v2.out_enc_resid);
 
-	bvec_set_page(&bv, con->v2.out_enc_pages[con->v2.out_enc_i],
-		      min(con->v2.out_enc_resid, (int)PAGE_SIZE), 0);
-
+	con->v2.out_enc_i += enc_pages_bvec(con->v2.out_enc_pages,
+					    con->v2.out_enc_page_cnt,
+					    con->v2.out_enc_i,
+					    con->v2.out_enc_resid, &bv);
 	set_out_bvec(con, &bv, false);
-	con->v2.out_enc_i++;
 	con->v2.out_enc_resid -= bv.bv_len;
 
 	if (con->v2.out_enc_resid) {
@@ -3464,8 +3542,8 @@ static void finish_message(struct ceph_connection *con)
 	/* we end up here both plain and secure modes */
 	if (con->v2.out_enc_pages) {
 		WARN_ON(!con->v2.out_enc_page_cnt);
-		ceph_release_page_vector(con->v2.out_enc_pages,
-					 con->v2.out_enc_page_cnt);
+		free_enc_pages(con->v2.out_enc_pages,
+			       con->v2.out_enc_page_cnt);
 		con->v2.out_enc_pages = NULL;
 		con->v2.out_enc_page_cnt = 0;
 	}
@@ -4024,15 +4102,15 @@ void ceph_con_v2_reset_protocol(struct ceph_connection *con)
 
 	if (con->v2.in_enc_pages) {
 		WARN_ON(!con->v2.in_enc_page_cnt);
-		ceph_release_page_vector(con->v2.in_enc_pages,
-					 con->v2.in_enc_page_cnt);
+		free_enc_pages(con->v2.in_enc_pages,
+			       con->v2.in_enc_page_cnt);
 		con->v2.in_enc_pages = NULL;
 		con->v2.in_enc_page_cnt = 0;
 	}
 	if (con->v2.out_enc_pages) {
 		WARN_ON(!con->v2.out_enc_page_cnt);
-		ceph_release_page_vector(con->v2.out_enc_pages,
-					 con->v2.out_enc_page_cnt);
+		free_enc_pages(con->v2.out_enc_pages,
+			       con->v2.out_enc_page_cnt);
 		con->v2.out_enc_pages = NULL;
 		con->v2.out_enc_page_cnt = 0;
 	}
