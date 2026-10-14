@@ -236,7 +236,6 @@ struct ceph_msg_data_cursor {
 	struct ceph_msg_data	*data;		/* current data item */
 	size_t			resid;		/* bytes not yet consumed */
 	int			sr_resid;	/* residual sparse_read len */
-	bool			need_crc;	/* crc update needed */
 	union {
 #ifdef CONFIG_BLOCK
 		struct ceph_bio_iter	bio_iter;

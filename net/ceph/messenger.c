@@ -1107,7 +1107,6 @@ static void __ceph_msg_data_cursor_init(struct ceph_msg_data_cursor *cursor)
 		/* BUG(); */
 		break;
 	}
-	cursor->need_crc = true;
 }
 
 void ceph_msg_data_cursor_init(struct ceph_msg_data_cursor *cursor,
@@ -1167,31 +1166,29 @@ struct page *ceph_msg_data_next(struct ceph_msg_data_cursor *cursor,
 }
 
 /*
- * Returns true if the result moves the cursor on to the next piece
- * of the data item.
+ * Advance the cursor by @bytes, moving on to the next data item once
+ * this one is done.
  */
 void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 {
-	bool new_piece;
-
 	BUG_ON(bytes > cursor->resid);
 	switch (cursor->data->type) {
 	case CEPH_MSG_DATA_PAGELIST:
-		new_piece = ceph_msg_data_pagelist_advance(cursor, bytes);
+		ceph_msg_data_pagelist_advance(cursor, bytes);
 		break;
 	case CEPH_MSG_DATA_PAGES:
-		new_piece = ceph_msg_data_pages_advance(cursor, bytes);
+		ceph_msg_data_pages_advance(cursor, bytes);
 		break;
 #ifdef CONFIG_BLOCK
 	case CEPH_MSG_DATA_BIO:
-		new_piece = ceph_msg_data_bio_advance(cursor, bytes);
+		ceph_msg_data_bio_advance(cursor, bytes);
 		break;
 #endif /* CONFIG_BLOCK */
 	case CEPH_MSG_DATA_BVECS:
-		new_piece = ceph_msg_data_bvecs_advance(cursor, bytes);
+		ceph_msg_data_bvecs_advance(cursor, bytes);
 		break;
 	case CEPH_MSG_DATA_ITER:
-		new_piece = ceph_msg_data_iter_advance(cursor, bytes);
+		ceph_msg_data_iter_advance(cursor, bytes);
 		break;
 	case CEPH_MSG_DATA_NONE:
 	default:
@@ -1203,9 +1200,7 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 	if (!cursor->resid && cursor->total_resid) {
 		cursor->data++;
 		__ceph_msg_data_cursor_init(cursor);
-		new_piece = true;
 	}
-	cursor->need_crc = new_piece;
 }
 
 #define CEPH_MSG_DATA_RUN_PAGES	16
