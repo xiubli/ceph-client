@@ -10,6 +10,7 @@
 #include <linux/nsproxy.h>
 #include <linux/sched/mm.h>
 #include <linux/slab.h>
+#include <linux/sizes.h>
 #include <linux/socket.h>
 #include <linux/string.h>
 #ifdef	CONFIG_BLOCK
@@ -1203,7 +1204,15 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 	}
 }
 
-#define CEPH_MSG_DATA_RUN_PAGES	16
+/*
+ * The longest run of pages a piece of message data may span.  Each
+ * piece is checksummed right after it was sent or received; much more
+ * than this and the data has left the CPU cache by then, which costs
+ * more than the per-page work runs save (a 2M folio of a block device
+ * page cache read through rbd made crc32c five times as expensive).
+ */
+#define CEPH_MSG_DATA_RUN_MAX	SZ_64K
+#define CEPH_MSG_DATA_RUN_PAGES	(CEPH_MSG_DATA_RUN_MAX >> PAGE_SHIFT)
 
 /*
  * ceph_msg_data_next_run() for an iterator: take the first page as
@@ -1228,7 +1237,7 @@ ceph_msg_data_iter_next_run(struct ceph_msg_data_cursor *cursor,
 
 	folio = page_folio(page);
 	n = min_t(long, folio_nr_pages(folio) - folio_page_idx(folio, page) - 1,
-		  ARRAY_SIZE(pages));
+		  ARRAY_SIZE(pages) - 1);
 	if (n <= 0)
 		return page;
 
@@ -1278,6 +1287,7 @@ static void ceph_msg_data_extend_run(struct ceph_msg_data_cursor *cursor,
 
 	c = *cursor;
 	while (!offset_in_page(page_offset + *length) &&
+	       page_offset + *length < CEPH_MSG_DATA_RUN_MAX &&
 	       *length < cursor->resid) {
 		struct page *next;
 		size_t off, len;
@@ -1335,6 +1345,7 @@ struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
 	pages = cursor->data->pages;
 	for (i = cursor->page_index;
 	     *page_offset + *length == (i + 1 - cursor->page_index) * PAGE_SIZE &&
+	     i + 1 - cursor->page_index < CEPH_MSG_DATA_RUN_PAGES &&
 	     *length < cursor->resid && i + 1 < cursor->page_count;
 	     i++) {
 		struct folio *folio = page_folio(pages[i]);
