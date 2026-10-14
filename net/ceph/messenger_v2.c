@@ -152,11 +152,16 @@ static int do_try_sendpage(struct socket *sock, struct iov_iter *it)
 		return -EINVAL;
 
 	while (iov_iter_count(it)) {
-		/* iov_iter_iovec() for ITER_BVEC */
-		bvec_set_page(&bv, it->bvec->bv_page,
+		/*
+		 * iov_iter_iovec() for ITER_BVEC.  A data bvec may cover
+		 * several pages of a folio (see get_bvec_run()), so after a
+		 * short send the offset can be past its first page.
+		 */
+		bvec_set_page(&bv, it->bvec->bv_page +
+				((it->bvec->bv_offset + it->iov_offset) >> PAGE_SHIFT),
 			      min(iov_iter_count(it),
 				  it->bvec->bv_len - it->iov_offset),
-			      it->bvec->bv_offset + it->iov_offset);
+			      offset_in_page(it->bvec->bv_offset + it->iov_offset));
 
 		/*
 		 * MSG_SPLICE_PAGES cannot properly handle pages with
@@ -880,6 +885,24 @@ static void get_bvec_at(struct ceph_msg_data_cursor *cursor,
 
 	/* get a piece of data, cursor isn't advanced */
 	page = ceph_msg_data_next(cursor, &off, &len);
+	bvec_set_page(bv, page, len, off);
+}
+
+/* Like get_bvec_at(), but a page array piece may span a folio's pages. */
+static void get_bvec_run(struct ceph_msg_data_cursor *cursor,
+			 struct bio_vec *bv)
+{
+	struct page *page;
+	size_t off, len;
+
+	WARN_ON(!cursor->total_resid);
+
+	/* skip zero-length data items */
+	while (!cursor->resid)
+		ceph_msg_data_advance(cursor, 0);
+
+	/* get a piece of data, cursor isn't advanced */
+	page = ceph_msg_data_next_run(cursor, &off, &len);
 	bvec_set_page(bv, page, len, off);
 }
 
@@ -3348,7 +3371,7 @@ static void queue_data(struct ceph_connection *con, struct ceph_msg *msg)
 	ceph_msg_data_cursor_init(&con->v2.out_cursor, msg,
 				  data_len(msg));
 
-	get_bvec_at(&con->v2.out_cursor, &bv);
+	get_bvec_run(&con->v2.out_cursor, &bv);
 	set_out_bvec(con, &bv, true);
 	con->v2.out_state = OUT_S_QUEUE_DATA_CONT;
 }
@@ -3359,13 +3382,15 @@ static void queue_data_cont(struct ceph_connection *con, struct ceph_msg *msg)
 
 	lockdep_assert_held(&con->mutex);
 
-	con->v2.out_epil.data_crc = ceph_crc32c_page(
-		con->v2.out_epil.data_crc, con->v2.out_bvec.bv_page,
-		con->v2.out_bvec.bv_offset, con->v2.out_bvec.bv_len);
+	con->v2.out_epil.data_crc =
+		ceph_crc32c_run(con->v2.out_epil.data_crc,
+				con->v2.out_bvec.bv_page,
+				con->v2.out_bvec.bv_offset,
+				con->v2.out_bvec.bv_len);
 
-	ceph_msg_data_advance(&con->v2.out_cursor, con->v2.out_bvec.bv_len);
+	ceph_msg_data_advance_run(&con->v2.out_cursor, con->v2.out_bvec.bv_len);
 	if (con->v2.out_cursor.total_resid) {
-		get_bvec_at(&con->v2.out_cursor, &bv);
+		get_bvec_run(&con->v2.out_cursor, &bv);
 		set_out_bvec(con, &bv, true);
 		WARN_ON(con->v2.out_state != OUT_S_QUEUE_DATA_CONT);
 		return;
@@ -3742,10 +3767,12 @@ static void revoke_at_queue_data_cont(struct ceph_connection *con,
 	dout("%s con %p sent %d resid %d\n", __func__, con, sent, resid);
 
 	if (sent) {
-		con->v2.out_epil.data_crc = ceph_crc32c_page(
-			con->v2.out_epil.data_crc, con->v2.out_bvec.bv_page,
-			con->v2.out_bvec.bv_offset, sent);
-		ceph_msg_data_advance(&con->v2.out_cursor, sent);
+		/* the piece may be a multi-page run, see get_bvec_run() */
+		con->v2.out_epil.data_crc =
+			ceph_crc32c_run(con->v2.out_epil.data_crc,
+					con->v2.out_bvec.bv_page,
+					con->v2.out_bvec.bv_offset, sent);
+		ceph_msg_data_advance_run(&con->v2.out_cursor, sent);
 	}
 	WARN_ON(resid > con->v2.out_cursor.total_resid);
 	con->v2.out_epil.data_crc = crc32c_zeros(con->v2.out_epil.data_crc,

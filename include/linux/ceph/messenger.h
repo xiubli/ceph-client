@@ -553,6 +553,12 @@ struct page *ceph_msg_data_next(struct ceph_msg_data_cursor *cursor,
 				size_t *page_offset, size_t *length);
 void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes);
 
+struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
+				    size_t *page_offset, size_t *length);
+void ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
+			       size_t bytes);
+u32 ceph_crc32c_run(u32 crc, struct page *page, unsigned int offset,
+		    unsigned int length);
 u32 ceph_crc32c_page(u32 crc, struct page *page, unsigned int page_offset,
 		     unsigned int length);
 

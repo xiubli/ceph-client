@@ -1208,6 +1208,81 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes)
 	cursor->need_crc = new_piece;
 }
 
+/*
+ * Like ceph_msg_data_next(), but for a page array extend the piece over
+ * the following pages as long as they are the next pages of the same
+ * folio, so that a large page cache folio can be sent in one go instead
+ * of a page at a time.  The piece may then be longer than a page; it
+ * never leaves the folio, so its pages are consecutive.  The cursor
+ * isn't advanced; use ceph_msg_data_advance_run() for that.
+ */
+struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
+				    size_t *page_offset, size_t *length)
+{
+	struct page *page = ceph_msg_data_next(cursor, page_offset, length);
+	struct page **pages;
+	unsigned int i;
+
+	if (cursor->data->type != CEPH_MSG_DATA_PAGES)
+		return page;
+
+	pages = cursor->data->pages;
+	for (i = cursor->page_index;
+	     *page_offset + *length == (i + 1 - cursor->page_index) * PAGE_SIZE &&
+	     *length < cursor->resid && i + 1 < cursor->page_count;
+	     i++) {
+		struct folio *folio = page_folio(pages[i]);
+		unsigned long idx = folio_page_idx(folio, pages[i]);
+
+		if (idx + 1 >= folio_nr_pages(folio) ||
+		    pages[i + 1] != folio_page(folio, idx + 1))
+			break;
+		*length += min_t(size_t, PAGE_SIZE, cursor->resid - *length);
+	}
+	return page;
+}
+
+/* Advance the cursor over (part of) a piece from ceph_msg_data_next_run(). */
+void ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
+			       size_t bytes)
+{
+	while (bytes) {
+		size_t off, len;
+
+		while (!cursor->resid)
+			ceph_msg_data_advance(cursor, 0);
+		ceph_msg_data_next(cursor, &off, &len);
+		len = min(bytes, len);
+		ceph_msg_data_advance(cursor, len);
+		bytes -= len;
+	}
+}
+
+/*
+ * crc32c of @length bytes at @offset of @page, which may cross into the
+ * following pages of the same folio
+ */
+u32 ceph_crc32c_run(u32 crc, struct page *page, unsigned int offset,
+		    unsigned int length)
+{
+	/* the pages of a folio are contiguous in the direct map */
+	if (!IS_ENABLED(CONFIG_HIGHMEM))
+		return crc32c(crc, page_address(page) + offset, length);
+
+	page += offset >> PAGE_SHIFT;
+	offset = offset_in_page(offset);
+	while (length) {
+		unsigned int n = min_t(unsigned int, length,
+				       PAGE_SIZE - offset);
+
+		crc = ceph_crc32c_page(crc, page, offset, n);
+		page++;	/* a run stays within one folio */
+		offset = 0;
+		length -= n;
+	}
+	return crc;
+}
+
 u32 ceph_crc32c_page(u32 crc, struct page *page, unsigned int page_offset,
 		     unsigned int length)
 {

@@ -515,7 +515,12 @@ static int write_partial_message_data(struct ceph_connection *con,
 			continue;
 		}
 
-		page = ceph_msg_data_next(cursor, &page_offset, &length);
+		/*
+		 * A piece may span the pages of a large folio; checksum
+		 * exactly what was sent, so a short send never gets any
+		 * byte counted twice.
+		 */
+		page = ceph_msg_data_next_run(cursor, &page_offset, &length);
 		ret = ceph_tcp_sendpage(con->sock, page, page_offset, length,
 					MSG_MORE);
 		if (ret <= 0) {
@@ -524,9 +529,9 @@ static int write_partial_message_data(struct ceph_connection *con,
 
 			return ret;
 		}
-		if (do_datacrc && cursor->need_crc)
-			crc = ceph_crc32c_page(crc, page, page_offset, length);
-		ceph_msg_data_advance(cursor, (size_t)ret);
+		if (do_datacrc)
+			crc = ceph_crc32c_run(crc, page, page_offset, ret);
+		ceph_msg_data_advance_run(cursor, (size_t)ret);
 	}
 
 	dout("%s %p msg %p done\n", __func__, con, msg);
