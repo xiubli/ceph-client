@@ -1273,13 +1273,11 @@ static void ceph_msg_data_extend_run(struct ceph_msg_data_cursor *cursor,
 				     struct page *page, size_t page_offset,
 				     size_t *length)
 {
-	struct folio *folio = page_folio(page);
+	struct folio *folio;
 	struct bio_vec bv;
 	size_t max;
 
-	/* nothing past the last page of a folio, e.g. in order-0 pages */
-	if (offset_in_page(page_offset + *length) ||
-	    folio_page_idx(folio, page) + 1 >= folio_nr_pages(folio))
+	if (offset_in_page(page_offset + *length))
 		return;
 
 #ifdef CONFIG_BLOCK
@@ -1290,9 +1288,17 @@ static void ceph_msg_data_extend_run(struct ceph_msg_data_cursor *cursor,
 #endif
 		bv = mp_bvec_iter_bvec(cursor->data->bvec_pos.bvecs,
 				       cursor->bvec_iter);
+	/*
+	 * Nothing to extend if the bvec ends with this page, as the
+	 * order-0 user pages of direct I/O do: decide that without
+	 * touching the struct page, which is likely not in the cache.
+	 */
+	if (bv.bv_len <= *length)
+		return;
 	if (WARN_ON_ONCE(bv.bv_page + (bv.bv_offset >> PAGE_SHIFT) != page))
 		return;
 
+	folio = page_folio(page);
 	max = folio_size(folio) - page_offset -
 	      ((size_t)folio_page_idx(folio, page) << PAGE_SHIFT);
 	max = min3(max, CEPH_MSG_DATA_RUN_MAX - page_offset, cursor->resid);
@@ -1374,7 +1380,26 @@ void ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
 
 		while (!cursor->resid)
 			ceph_msg_data_advance(cursor, 0);
-		ceph_msg_data_next(cursor, &off, &len);
+		/* the length of the current piece, without the page lookup */
+		switch (cursor->data->type) {
+		case CEPH_MSG_DATA_PAGES:
+			len = min_t(size_t, cursor->resid,
+				    PAGE_SIZE - cursor->page_offset);
+			break;
+#ifdef CONFIG_BLOCK
+		case CEPH_MSG_DATA_BIO:
+			len = bio_iter_len(cursor->bio_iter.bio,
+					   cursor->bio_iter.iter);
+			break;
+#endif
+		case CEPH_MSG_DATA_BVECS:
+			len = bvec_iter_len(cursor->data->bvec_pos.bvecs,
+					    cursor->bvec_iter);
+			break;
+		default:
+			ceph_msg_data_next(cursor, &off, &len);
+			break;
+		}
 		len = min(bytes, len);
 		ceph_msg_data_advance(cursor, len);
 		bytes -= len;
