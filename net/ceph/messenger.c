@@ -1264,43 +1264,39 @@ ceph_msg_data_iter_next_run(struct ceph_msg_data_cursor *cursor,
 }
 
 /*
- * Extend a bio or bvec array piece over the pieces that follow it as
- * long as they are the next pages of the same folio.  These cursors
- * hand out a page at a time, also from a multi-page bvec, so look ahead
- * with a copy of the cursor.
+ * Extend a bio or bvec array piece, which these cursors hand out a page
+ * at a time, over the rest of the multi-page bvec it comes from, as far
+ * as that stays in the folio of its first page.  The pages of a bvec are
+ * physically contiguous, so within one folio they are consecutive.
  */
 static void ceph_msg_data_extend_run(struct ceph_msg_data_cursor *cursor,
 				     struct page *page, size_t page_offset,
 				     size_t *length)
 {
 	struct folio *folio = page_folio(page);
-	struct ceph_msg_data_cursor c;
-	size_t piece = *length;
+	struct bio_vec bv;
+	size_t max;
 
-	/*
-	 * Nothing to look for past the last page of a folio, e.g. in the
-	 * order-0 user pages of direct I/O: don't pay for the copy.
-	 */
+	/* nothing past the last page of a folio, e.g. in order-0 pages */
 	if (offset_in_page(page_offset + *length) ||
 	    folio_page_idx(folio, page) + 1 >= folio_nr_pages(folio))
 		return;
 
-	c = *cursor;
-	while (!offset_in_page(page_offset + *length) &&
-	       page_offset + *length < CEPH_MSG_DATA_RUN_MAX &&
-	       *length < cursor->resid) {
-		struct page *next;
-		size_t off, len;
+#ifdef CONFIG_BLOCK
+	if (cursor->data->type == CEPH_MSG_DATA_BIO)
+		bv = mp_bvec_iter_bvec(cursor->bio_iter.bio->bi_io_vec,
+				       cursor->bio_iter.iter);
+	else
+#endif
+		bv = mp_bvec_iter_bvec(cursor->data->bvec_pos.bvecs,
+				       cursor->bvec_iter);
+	if (WARN_ON_ONCE(bv.bv_page + (bv.bv_offset >> PAGE_SHIFT) != page))
+		return;
 
-		ceph_msg_data_advance(&c, piece);
-		next = ceph_msg_data_next(&c, &off, &len);
-		if (off ||
-		    next != page + ((page_offset + *length) >> PAGE_SHIFT) ||
-		    page_folio(next) != folio)
-			break;
-		*length += len;
-		piece = len;
-	}
+	max = folio_size(folio) - page_offset -
+	      ((size_t)folio_page_idx(folio, page) << PAGE_SHIFT);
+	max = min3(max, CEPH_MSG_DATA_RUN_MAX - page_offset, cursor->resid);
+	*length = max(*length, min_t(size_t, bv.bv_len, max));
 }
 
 /*
