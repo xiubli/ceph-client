@@ -158,9 +158,8 @@ static void ceph_folio_note_write(struct inode *inode, struct folio *folio,
 	struct ceph_dirty_range *dr = __ceph_dirty_range(folio->private);
 	unsigned int start = offset_in_folio(folio, pos);
 	unsigned int end = start + copied;
-	loff_t eof;
 
-	if (!folio_test_large(folio) || !copied)
+	if (!copied || IS_ENCRYPTED(inode))
 		return;
 	if (was_dirty) {
 		/* a whole dirty folio stays whole */
@@ -174,9 +173,11 @@ static void ceph_folio_note_write(struct inode *inode, struct folio *folio,
 	/* a folio that was clean has just got its plain snap context */
 	if (WARN_ON_ONCE(dr || !folio->private))
 		return;
-	/* nothing to save if the write covers the folio up to EOF */
-	eof = i_size_read(inode) - folio_pos(folio);
-	if (!start && end >= min_t(loff_t, folio_size(folio), eof))
+	/*
+	 * Nothing to save only if the write covers the whole folio: the
+	 * local EOF may be stale while other clients write beyond it.
+	 */
+	if (!start && end >= folio_size(folio))
 		return;
 	dr = kmalloc_obj(*dr, GFP_NOFS);
 	if (!dr)
