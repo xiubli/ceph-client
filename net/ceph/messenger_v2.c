@@ -1075,7 +1075,8 @@ static void init_sgs_cursor(struct scatterlist **sg,
 		sg_set_page(*sg, bv.bv_page, bv.bv_len, bv.bv_offset);
 		*sg = sg_next(*sg);
 
-		ceph_msg_data_advance_run(cursor, bv.bv_len);
+		ceph_msg_data_advance_run(cursor, bv.bv_offset, bv.bv_len,
+					  bv.bv_len);
 	} while (cursor->total_resid);
 
 	if (need_padding(data_len)) {
@@ -2085,7 +2086,8 @@ static void prepare_read_data_cont(struct ceph_connection *con)
 						   con->v2.in_bvec.bv_len);
 	}
 
-	ceph_msg_data_advance_run(&con->v2.in_cursor, con->v2.in_bvec.bv_len);
+	ceph_msg_data_advance_run(&con->v2.in_cursor, con->v2.in_bvec.bv_offset,
+				  con->v2.in_bvec.bv_len, con->v2.in_bvec.bv_len);
 	if (con->v2.in_cursor.total_resid) {
 		if (ceph_test_opt(from_msgr(con->msgr), RXBOUNCE)) {
 			get_bvec_at(&con->v2.in_cursor, &bv);
@@ -3480,7 +3482,8 @@ static void queue_data_cont(struct ceph_connection *con, struct ceph_msg *msg)
 				con->v2.out_bvec.bv_offset,
 				con->v2.out_bvec.bv_len);
 
-	ceph_msg_data_advance_run(&con->v2.out_cursor, con->v2.out_bvec.bv_len);
+	ceph_msg_data_advance_run(&con->v2.out_cursor, con->v2.out_bvec.bv_offset,
+				  con->v2.out_bvec.bv_len, con->v2.out_bvec.bv_len);
 	if (con->v2.out_cursor.total_resid) {
 		get_bvec_run(&con->v2.out_cursor, &bv);
 		set_out_bvec(con, &bv, true);
@@ -3864,7 +3867,9 @@ static void revoke_at_queue_data_cont(struct ceph_connection *con,
 			ceph_crc32c_run(con->v2.out_epil.data_crc,
 					con->v2.out_bvec.bv_page,
 					con->v2.out_bvec.bv_offset, sent);
-		ceph_msg_data_advance_run(&con->v2.out_cursor, sent);
+		ceph_msg_data_advance_run(&con->v2.out_cursor,
+					  con->v2.out_bvec.bv_offset,
+					  con->v2.out_bvec.bv_len, sent);
 	}
 	WARN_ON(resid > con->v2.out_cursor.total_resid);
 	con->v2.out_epil.data_crc = crc32c_zeros(con->v2.out_epil.data_crc,
@@ -3998,7 +4003,9 @@ static void revoke_at_prepare_read_data_cont(struct ceph_connection *con)
 	dout("%s con %p recved %d resid %d\n", __func__, con, recved, resid);
 
 	if (recved)
-		ceph_msg_data_advance_run(&con->v2.in_cursor, recved);
+		ceph_msg_data_advance_run(&con->v2.in_cursor,
+					  con->v2.in_bvec.bv_offset,
+					  con->v2.in_bvec.bv_len, recved);
 	WARN_ON(resid > con->v2.in_cursor.total_resid);
 
 	remaining = CEPH_EPILOGUE_PLAIN_LEN;

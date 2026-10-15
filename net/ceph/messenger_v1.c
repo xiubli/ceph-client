@@ -532,7 +532,8 @@ static int write_partial_message_data(struct ceph_connection *con,
 		}
 		if (do_datacrc)
 			crc = ceph_crc32c_run(crc, page, page_offset, ret);
-		ceph_msg_data_advance_run(cursor, (size_t)ret);
+		ceph_msg_data_advance_run(cursor, page_offset, length,
+					  (size_t)ret);
 	}
 
 	dout("%s %p msg %p done\n", __func__, con, msg);
@@ -1158,7 +1159,8 @@ static int read_partial_msg_data(struct ceph_connection *con)
 
 		if (do_datacrc)
 			crc = ceph_crc32c_run(crc, page, page_offset, ret);
-		ceph_msg_data_advance_run(cursor, (size_t)ret);
+		ceph_msg_data_advance_run(cursor, page_offset, length,
+					  (size_t)ret);
 	}
 	if (do_datacrc)
 		con->in_data_crc = crc;

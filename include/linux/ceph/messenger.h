@@ -554,8 +554,23 @@ void ceph_msg_data_advance(struct ceph_msg_data_cursor *cursor, size_t bytes);
 
 struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
 				    size_t *page_offset, size_t *length);
-void ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
-			       size_t bytes);
+void __ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
+				 size_t bytes);
+
+/*
+ * Advance the cursor over @bytes of a piece from ceph_msg_data_next_run()
+ * at @page_offset, @length long.  A piece within one page is what
+ * ceph_msg_data_next() hands out, and ceph_msg_data_advance() takes it.
+ */
+static inline void
+ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
+			  size_t page_offset, size_t length, size_t bytes)
+{
+	if (page_offset + length <= PAGE_SIZE)
+		ceph_msg_data_advance(cursor, bytes);
+	else
+		__ceph_msg_data_advance_run(cursor, bytes);
+}
 u32 ceph_crc32c_run(u32 crc, struct page *page, unsigned int offset,
 		    unsigned int length);
 u32 ceph_crc32c_page(u32 crc, struct page *page, unsigned int page_offset,

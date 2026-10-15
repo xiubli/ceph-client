@@ -1361,9 +1361,9 @@ struct page *ceph_msg_data_next_run(struct ceph_msg_data_cursor *cursor,
 	return page;
 }
 
-/* Advance the cursor over (part of) a piece from ceph_msg_data_next_run(). */
-void ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
-			       size_t bytes)
+/* Advance the cursor over (part of) a multi-page ceph_msg_data_next_run() piece. */
+void __ceph_msg_data_advance_run(struct ceph_msg_data_cursor *cursor,
+				 size_t bytes)
 {
 	while (!cursor->resid && bytes)
 		ceph_msg_data_advance(cursor, 0);
