@@ -1457,13 +1457,19 @@ int ceph_check_folio_before_write(struct address_space *mapping,
 	/*
 	 * A dirty range that a truncate moved EOF below (before the page
 	 * cache got truncated): write the folio up to EOF instead, as a
-	 * folio without a range would be.
+	 * folio without a range would be.  The head's EOF is read now,
+	 * not when this pass began: writes that extended the file since
+	 * then (into this folio too, which is locked now) must not look
+	 * like a truncate, or the clean bytes in front of the range, which
+	 * may be zeros or stale data of another lazy I/O writer, go out.
 	 */
 	{
+		loff_t isize = ceph_wbc->size_stable ? ceph_wbc->i_size :
+						       i_size_read(inode);
 		size_t start, end;
 
 		ceph_folio_dirty_range(folio, &start, &end);
-		if (folio_pos(folio) + start >= ceph_wbc->i_size)
+		if (folio_pos(folio) + start >= isize)
 			ceph_folio_dirty_whole(folio);
 	}
 
