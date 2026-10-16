@@ -1670,6 +1670,18 @@ void ceph_process_folio_batch(struct address_space *mapping,
 			break;
 		}
 
+		/*
+		 * Nor may it need an extent beyond the request's ops: check
+		 * that before the folio is cleaned, as redirtying it would
+		 * lose its dirty range.
+		 */
+		if (ceph_wbc->locked_pages &&
+		    !is_folio_index_contiguous(ceph_wbc, folio) &&
+		    is_num_ops_too_big(ceph_wbc)) {
+			folio_unlock(folio);
+			break;
+		}
+
 		if (!folio_clear_dirty_for_io(folio)) {
 			boutc(cl, "%p !folio_clear_dirty_for_io\n", folio);
 			folio_unlock(folio);
@@ -1691,12 +1703,6 @@ void ceph_process_folio_batch(struct address_space *mapping,
 			/* the folio order of a mapping is capped at wsize */
 			WARN_ON_ONCE(folio_nr_pages(folio) > ceph_wbc->max_pages);
 		} else if (!is_folio_index_contiguous(ceph_wbc, folio)) {
-			if (is_num_ops_too_big(ceph_wbc)) {
-				folio_redirty_for_writepage(wbc, folio);
-				folio_unlock(folio);
-				break;
-			}
-
 			ceph_wbc->num_ops++;
 			ceph_folio_write_range(folio, &ceph_wbc->offset,
 					       &end);
