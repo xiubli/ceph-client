@@ -2328,6 +2328,14 @@ static int ceph_write_end(const struct kiocb *iocb,
 		folio_mark_uptodate(folio);
 	}
 
+	/*
+	 * Nothing copied (the user buffer faulted; the write is retried):
+	 * dirtying the folio now would give it no dirty range, and it
+	 * would go out as a whole.
+	 */
+	if (!copied)
+		goto out;
+
 	/* did file size increase? */
 	if (pos+copied > i_size_read(inode))
 		check_cap = ceph_inode_set_size(inode, pos+copied);
